@@ -9,7 +9,7 @@
 #include <time.h>
 #include <sstream>
 
-//#define STATS
+#define STATS
 //#define RUSSIAN_ROULETTE
 //#define SHADOW
 #define TEXTURES
