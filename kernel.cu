@@ -11,12 +11,12 @@
 
 #define STATS
 //#define RUSSIAN_ROULETTE
-//#define SHADOW
+#define SHADOW
 #define TEXTURES
 
 //#define PRIMARY_PERFECT
-//#define PRIMARY0
-#define PRIMARY1
+#define PRIMARY0
+//#define PRIMARY1
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -189,7 +189,7 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
 
     while (true) {
 #ifdef STATS
-        {
+        /*if (isShadow)*/ {
             auto g = coalesced_threads();
             if (g.thread_rank() == 0) {
                 context.incStat(METRIC_ACTIVE_ITER);
@@ -203,7 +203,7 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
             if (hit_bbox(node.min(), node.max(), r, closest)) {
                 if (idx >= context.firstLeafIdx) { // leaf node
 #ifdef STATS
-                    {
+                    /*if (isShadow)*/ {
                         auto g = coalesced_threads();
                         if (g.thread_rank() == 0) {
                             context.incStat(METRIC_LEAF_ITER);
