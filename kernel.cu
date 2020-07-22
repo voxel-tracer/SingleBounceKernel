@@ -13,7 +13,10 @@
 //#define RUSSIAN_ROULETTE
 //#define SHADOW
 #define TEXTURES
-//#define PERFECT_PRIMARY
+
+//#define PRIMARY_PERFECT
+//#define PRIMARY0
+#define PRIMARY1
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -404,6 +407,7 @@ __device__ void colorBounce(const RenderContext& context, path& p) {
         p.specular = scatter.specular;
         p.inside = scatter.refracted ? !p.inside : p.inside;
 
+        //p.color = p.attenuation; // debug
 #ifdef SHADOW
         // trace shadow ray for diffuse rays
         if (!p.specular && generateShadowRay(context, p, inters)) {
@@ -491,7 +495,9 @@ __global__ void primary(const RenderContext context) {
     }
 }
 
-__global__ void primaryBounce(const RenderContext context, bool save) {
+#ifdef PRIMARY0
+// original primaryBounce() kernel: each thread handles all samples of the same pixel
+__global__ void primaryBounce0(const RenderContext context, bool save) {
 #ifdef PERFECT_PRIMARY
     int x = ((threadIdx.x + blockIdx.x * blockDim.x) / 32) * 32; // all rays in the same warp have the same pixelId
 #else
@@ -536,6 +542,49 @@ __global__ void primaryBounce(const RenderContext context, bool save) {
         context.colors[p.pixelId] += color / float(context.ns);
     }
 }
+#endif // PRIMARY0
+
+#ifdef PRIMARY1
+// start one thread per sample, each consecutive 32 samples (warp) are from the same pixel
+__global__ void primaryBounce1(const RenderContext context, bool save) {
+    int xs = threadIdx.x + blockIdx.x * blockDim.x;
+    int y = threadIdx.y + blockIdx.y * blockDim.y;
+    if ((xs >= (context.nx * context.ns)) || (y >= context.ny)) return;
+    int x = xs / context.ns;
+    int s = xs % context.ns;
+
+    path p;
+    vec3 color(0, 0, 0);
+    p.pixelId = y * context.nx + x;
+    int sampleId = p.pixelId * context.ns + s;
+    p.rng = (wang_hash(sampleId) * 336343633) | 1;
+
+    float u = float(x + rnd(p.rng)) / float(context.nx);
+    float v = float(y + rnd(p.rng)) / float(context.ny);
+    ray r = get_ray(context.cam, u, v, p.rng);
+    p.origin = r.origin();
+    p.rayDir = r.direction();
+    p.attenuation = vec3(1, 1, 1);
+    p.color = vec3();
+    p.specular = false;
+    p.inside = false;
+    p.done = false;
+    p.bounce = 0;
+
+    colorBounce(context, p);
+    color += p.color;
+#ifdef STATS
+    if (isnan(p.color)) context.incStat(NUM_RAYS_NAN);
+#endif
+
+    // following code is not used, but leave it here for now in case compiler is smart enough to undo all our work if we don't save anything
+    if (save) {
+        // all samples for same pixel are saved in consecutive order
+        context.paths[sampleId] = saved_path(p);
+        context.colors[sampleId] = color;
+    }
+}
+#endif // PRIMARY1
 
 bool initRenderContext(RenderContext& context, int nx, int ny, int ns) {
     camera cam = setup_camera(nx, ny);
@@ -561,9 +610,16 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns) {
     uint32_t numpaths = context.nx * context.ny * context.ns;
     CUDA(cudaMallocManaged((void**)&context.paths, numpaths * sizeof(saved_path)));
 
+#ifdef PRIMARY0
     CUDA(cudaMallocManaged((void**)&context.colors, context.nx * context.ny * sizeof(vec3)));
     memset(context.colors, 0, context.nx * context.ny * sizeof(vec3));
-
+#endif
+#ifdef PRIMARY1
+    // to simplify primary1 kernel, store each color sample separately
+    uint32_t size = context.nx * context.ny * context.ns * sizeof(vec3);
+    CUDA(cudaMallocManaged((void**)&context.colors, size));
+    memset(context.colors, 0, size);
+#endif
 
     CUDA(cudaMalloc((void**)&context.tris, ksc.m->numTris * sizeof(triangle)));
     CUDA(cudaMemcpy(context.tris, ksc.m->tris, ksc.m->numTris * sizeof(triangle), cudaMemcpyHostToDevice));
@@ -648,6 +704,7 @@ std::string filename(int bounce, int ns) {
     return str.str();
 }
 
+#ifdef PRIMARY0
 void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
     dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
     dim3 threads(tx, ty);
@@ -655,7 +712,7 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
     clock_t time;
 
     time = clock();
-    primaryBounce <<<blocks, threads >>> (context, true);
+    primaryBounce0 <<<blocks, threads >>> (context, true);
     CUDA(cudaGetLastError());
     CUDA(cudaDeviceSynchronize());
     time = clock() - time;
@@ -679,22 +736,34 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
         }
     }
 }
+#endif
 
 void fromfile(int bnc, RenderContext &context, int tx, int ty) {
     if (bnc > 0) {
         load(filename(bnc - 1, context.ns), context);
     }
 
-    dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
-    dim3 threads(tx, ty);
-
     clock_t time;
 
     time = clock();
-    if (bnc == 0)
-        primaryBounce <<<blocks, threads >>> (context, false);
-    else
+    if (bnc == 0) {
+#ifdef PRIMARY0
+        dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
+        dim3 threads(tx, ty);
+        primaryBounce0 <<<blocks, threads >>> (context, false);
+#endif
+#ifdef PRIMARY1
+        tx = 32; ty = 2;
+        dim3 blocks((context.nx * context.ns) / tx + 1, context.ny / ty + 1);
+        dim3 threads(tx, ty);
+        primaryBounce1 <<<blocks, threads >>> (context, false);
+#endif
+    }
+    else {
+        dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
+        dim3 threads(tx, ty);
         bounce <<<blocks, threads >>> (context, bnc, false);
+    }
     CUDA(cudaGetLastError());
     CUDA(cudaDeviceSynchronize());
     time = clock() - time;
@@ -708,13 +777,13 @@ int main(int argc, char** argv)
     int nx = perf ? 160 : 320;
     int ny = perf ? 200 : 400;
     int ns = perf ? 4 : 64;
-#ifdef PERFECT_PRIMARY
+#ifdef PRIMARY_PERFECT
     int tx = 32;
     int ty = 2;
 #else
     int tx = 8;
     int ty = 8;
-#endif // PERFECT_PRIMARY
+#endif // PRIMARY_PERFECT
 
     bool save = false;
 
@@ -727,7 +796,18 @@ int main(int argc, char** argv)
         int bnc = strtol(argv[1], NULL, 10);
         fromfile(bnc, context, tx, ty);
     } else {
+#ifdef PRIMARY0
         iterate(context, tx, ty, save);
+#endif
+    }
+
+    if (save) {
+#ifdef PRIMARY0
+        writePPM(nx, ny, context.colors);
+#endif
+#ifdef PRIMARY1
+        writePPM(nx, ny, ns, context.colors);
+#endif
     }
 
     CUDA(cudaFree(context.paths));
