@@ -11,12 +11,13 @@
 
 #define STATS
 //#define RUSSIAN_ROULETTE
-#define SHADOW
+//#define SHADOW
 #define TEXTURES
 
 //#define PRIMARY_PERFECT
-#define PRIMARY0
+//#define PRIMARY0
 //#define PRIMARY1
+#define PRIMARY2
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -586,6 +587,50 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
 }
 #endif // PRIMARY1
 
+
+#ifdef PRIMARY2
+// start 32 threads per pixel, then each warp keeps looping until all samples of the pixel are processed
+__global__ void primaryBounce2(const RenderContext context, bool save) {
+    int xs = threadIdx.x + blockIdx.x * blockDim.x;
+    int y = threadIdx.y + blockIdx.y * blockDim.y;
+    if ((xs >= (context.nx * 32)) || (y >= context.ny)) return;
+    int x = xs / 32;
+    int s = xs % 32;
+
+    path p;
+    vec3 color(0, 0, 0);
+    p.pixelId = y * context.nx + x;
+    int sampleId = p.pixelId * context.ns + s;
+    p.rng = (wang_hash(sampleId) * 336343633) | 1;
+
+    for (; s < context.ns; s+= 32) {
+        float u = float(x + rnd(p.rng)) / float(context.nx);
+        float v = float(y + rnd(p.rng)) / float(context.ny);
+        ray r = get_ray(context.cam, u, v, p.rng);
+        p.origin = r.origin();
+        p.rayDir = r.direction();
+        p.attenuation = vec3(1, 1, 1);
+        p.color = vec3();
+        p.specular = false;
+        p.inside = false;
+        p.done = false;
+        p.bounce = 0;
+
+        colorBounce(context, p);
+        color += p.color;
+#ifdef STATS
+        if (isnan(p.color)) context.incStat(NUM_RAYS_NAN);
+#endif
+
+        if (save) {
+            // all samples for same pixel are saved in consecutive order
+            context.paths[sampleId] = saved_path(p);
+            context.colors[sampleId] = color;
+        }
+    }
+}
+#endif // PRIMARY2
+
 bool initRenderContext(RenderContext& context, int nx, int ny, int ns) {
     camera cam = setup_camera(nx, ny);
 
@@ -614,7 +659,7 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns) {
     CUDA(cudaMallocManaged((void**)&context.colors, context.nx * context.ny * sizeof(vec3)));
     memset(context.colors, 0, context.nx * context.ny * sizeof(vec3));
 #endif
-#ifdef PRIMARY1
+#if defined(PRIMARY1) || defined(PRIMARY2)
     // to simplify primary1 kernel, store each color sample separately
     uint32_t size = context.nx * context.ny * context.ns * sizeof(vec3);
     CUDA(cudaMallocManaged((void**)&context.colors, size));
@@ -748,15 +793,21 @@ void fromfile(int bnc, RenderContext &context, int tx, int ty) {
     time = clock();
     if (bnc == 0) {
 #ifdef PRIMARY0
-        dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
+        dim3 blocks((context.nx + tx - 1) / tx, (context.ny + ty - 1) / ty);
         dim3 threads(tx, ty);
         primaryBounce0 <<<blocks, threads >>> (context, false);
 #endif
 #ifdef PRIMARY1
         tx = 32; ty = 2;
-        dim3 blocks((context.nx * context.ns) / tx + 1, context.ny / ty + 1);
+        dim3 blocks((context.nx * context.ns + tx - 1) / tx, (context.ny + ty - 1) / ty);
         dim3 threads(tx, ty);
         primaryBounce1 <<<blocks, threads >>> (context, false);
+#endif
+#ifdef PRIMARY2
+        tx = 32; ty = 2;
+        dim3 blocks((context.nx * 32 + tx - 1) / tx, (context.ny + ty - 1) / ty);
+        dim3 threads(tx, ty);
+        primaryBounce2 <<<blocks, threads >>> (context, false);
 #endif
     }
     else {
@@ -805,7 +856,7 @@ int main(int argc, char** argv)
 #ifdef PRIMARY0
         writePPM(nx, ny, context.colors);
 #endif
-#ifdef PRIMARY1
+#if defined(PRIMARY1) || defined(PRIMARY2)
         writePPM(nx, ny, ns, context.colors);
 #endif
     }
