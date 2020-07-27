@@ -631,7 +631,7 @@ __global__ void primaryBounce2(const RenderContext context, bool save) {
 }
 #endif // PRIMARY2
 
-bool initRenderContext(RenderContext& context, int nx, int ny, int ns) {
+bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save) {
     camera cam = setup_camera(nx, ny);
 
     scene sc;
@@ -652,19 +652,21 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns) {
     context.cam = cam;
     context.numPrimitivesPerLeaf = ksc.numPrimitivesPerLeaf;
 
-    uint32_t numpaths = context.nx * context.ny * context.ns;
-    CUDA(cudaMallocManaged((void**)&context.paths, numpaths * sizeof(saved_path)));
+    if (save) {
+        uint32_t numpaths = context.nx * context.ny * context.ns;
+        CUDA(cudaMallocManaged((void**)&context.paths, numpaths * sizeof(saved_path)));
 
 #ifdef PRIMARY0
-    CUDA(cudaMallocManaged((void**)&context.colors, context.nx * context.ny * sizeof(vec3)));
-    memset(context.colors, 0, context.nx * context.ny * sizeof(vec3));
+        CUDA(cudaMallocManaged((void**)&context.colors, context.nx * context.ny * sizeof(vec3)));
+        memset(context.colors, 0, context.nx * context.ny * sizeof(vec3));
 #endif
 #if defined(PRIMARY1) || defined(PRIMARY2)
-    // to simplify primary1 kernel, store each color sample separately
-    uint32_t size = context.nx * context.ny * context.ns * sizeof(vec3);
-    CUDA(cudaMallocManaged((void**)&context.colors, size));
-    memset(context.colors, 0, size);
+        // to simplify primary1 kernel, store each color sample separately
+        uint32_t size = context.nx * context.ny * context.ns * sizeof(vec3);
+        CUDA(cudaMallocManaged((void**)&context.colors, size));
+        memset(context.colors, 0, size);
 #endif
+    }
 
     CUDA(cudaMalloc((void**)&context.tris, ksc.m->numTris * sizeof(triangle)));
     CUDA(cudaMemcpy(context.tris, ksc.m->tris, ksc.m->numTris * sizeof(triangle), cudaMemcpyHostToDevice));
@@ -839,7 +841,7 @@ int main(int argc, char** argv)
     bool save = false;
 
     RenderContext context;
-    if (!initRenderContext(context, nx, ny, ns)) {
+    if (!initRenderContext(context, nx, ny, ns, save)) {
         return -1;
     }
 
@@ -859,10 +861,10 @@ int main(int argc, char** argv)
 #if defined(PRIMARY1) || defined(PRIMARY2)
         writePPM(nx, ny, ns, context.colors);
 #endif
-    }
 
-    CUDA(cudaFree(context.paths));
-    CUDA(cudaFree(context.colors));
+        CUDA(cudaFree(context.paths));
+        CUDA(cudaFree(context.colors));
+    }
 
     return 0;
 }
