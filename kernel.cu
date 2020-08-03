@@ -15,9 +15,9 @@
 #define TEXTURES
 
 //#define PRIMARY_PERFECT
-//#define PRIMARY0
+#define PRIMARY0
 //#define PRIMARY1
-#define PRIMARY2
+//#define PRIMARY2
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -587,7 +587,6 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
 }
 #endif // PRIMARY1
 
-
 #ifdef PRIMARY2
 // start 32 threads per pixel, then each warp keeps looping until all samples of the pixel are processed
 __global__ void primaryBounce2(const RenderContext context, bool save) {
@@ -652,10 +651,10 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save
     context.cam = cam;
     context.numPrimitivesPerLeaf = ksc.numPrimitivesPerLeaf;
 
-    if (save) {
-        uint32_t numpaths = context.nx * context.ny * context.ns;
-        CUDA(cudaMallocManaged((void**)&context.paths, numpaths * sizeof(saved_path)));
+    uint32_t numpaths = context.nx * context.ny * context.ns;
+    CUDA(cudaMallocManaged((void**)&context.paths, numpaths * sizeof(saved_path)));
 
+    if (save) {
 #ifdef PRIMARY0
         CUDA(cudaMallocManaged((void**)&context.colors, context.nx * context.ny * sizeof(vec3)));
         memset(context.colors, 0, context.nx * context.ny * sizeof(vec3));
@@ -862,9 +861,10 @@ int main(int argc, char** argv)
         writePPM(nx, ny, ns, context.colors);
 #endif
 
-        CUDA(cudaFree(context.paths));
         CUDA(cudaFree(context.colors));
     }
+
+    CUDA(cudaFree(context.paths));
 
     return 0;
 }
