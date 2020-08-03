@@ -1,13 +1,8 @@
 
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
 #include <stdio.h>
 #include <stdint.h>
 #include <bitset>
-#include <fstream>
 #include <time.h>
-#include <sstream>
 
 #define STATS
 //#define RUSSIAN_ROULETTE
@@ -22,6 +17,8 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include "sbk.h"
+
 #include "../cuda-raytracing-optimized/camera.h"
 #include "../cuda-raytracing-optimized/scene_materials.h"
 #include "../cuda-raytracing-optimized/intersections.h"
@@ -32,26 +29,7 @@
 using namespace cooperative_groups;
 #endif
 
-
 #define EPSILON 0.01f
-
-// limited version of checkCudaErrors from helper_cuda.h in CUDA examples
-#define CUDA(val) check_cuda( (val), #val, __FILE__, __LINE__ )
-
-void check_cuda(cudaError_t result, char const* const func, const char* const file, int const line) {
-    if (result) {
-        std::cerr << "CUDA error = " << cudaGetErrorString(result) << " at " <<
-            file << ":" << line << " '" << func << "' \n";
-        // Make sure we call CUDA Device Reset before exiting
-        cudaDeviceReset();
-        exit(99);
-    }
-}
-
-#define FLAG_SPECULAR   1
-#define FLAG_INSIDE     2
-#define FLAG_DONE       4
-#define FLAGS(p)        ((p.specular ? FLAG_SPECULAR:0) | (p.inside ? FLAG_INSIDE:0) | (p.done ? FLAG_DONE:0))
 
 #ifdef STATS
 #define NUM_RAYS_PRIMARY                0
@@ -96,22 +74,6 @@ char* statNames[NUM_RAYS_SIZE] = {
 };
 #endif
 
-struct saved_path {
-    vec3 origin;
-    vec3 rayDir;
-    vec3 attenuation; // only needed to visually confirm the rendering is correct
-
-    uint8_t flags;
-    rand_state rng;
-
-    __host__ saved_path() {}
-    __device__ saved_path(const path& p) : origin(p.origin), rayDir(p.rayDir), flags(FLAGS(p)), attenuation(p.attenuation), rng(p.rng) {}
-
-    __device__ bool isDone() const { return flags & FLAG_DONE; }
-    __device__ bool isSpecular() const { return flags & FLAG_SPECULAR; }
-    __device__ bool isInside() const { return flags & FLAG_INSIDE; }
-};
-
 struct RenderContext {
     int nx, ny, ns;
     camera cam;
@@ -132,6 +94,8 @@ struct RenderContext {
     int* tex_width;
     int* tex_height;
 #endif
+
+    uint32_t numpaths() const { return nx * ny * ns; }
 
 
 #ifdef STATS
@@ -710,46 +674,6 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save
     return true;
 }
 
-void save(const std::string output, const RenderContext& context) {
-    std::fstream out(output, std::ios::out | std::ios::binary);
-    const char* HEADER = "SBK_00.01";
-    out.write(HEADER, sizeof(HEADER));
-    uint32_t numpaths = context.nx * context.ny * context.ns;
-    out.write((char*)&numpaths, sizeof(uint32_t));
-    out.write((char*)context.paths, sizeof(saved_path) * numpaths);
-    out.close();
-}
-
-bool load(const std::string input, RenderContext & context) {
-    std::fstream in(input, std::ios::in | std::ios::binary);
-    const char* HEADER = "SBK_00.01";
-    char* header = new char[sizeof(HEADER)];
-    in.read(header, sizeof(HEADER));
-    if (!strcmp(HEADER, header)) {
-        std::cerr << "invalid header " << header << std::endl;
-        return false;
-    }
-
-    uint32_t numpaths;
-    in.read((char*)&numpaths, sizeof(uint32_t));
-    if (numpaths != (context.nx * context.ny * context.ns)) {
-        std::cerr << "numpaths doesn't match file. expected " << (context.nx * context.ny * context.ns) << ", but found " << numpaths << std::endl;
-        return false;
-    }
-
-    in.read((char*)context.paths, sizeof(saved_path) * numpaths);
-
-    in.close();
-
-    return true;
-}
-
-std::string filename(int bounce, int ns) {
-    std::stringstream str;
-    str << "bounce." << ns << "." << bounce << ".sbk";
-    return str.str();
-}
-
 #ifdef PRIMARY0
 void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
     dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
@@ -765,7 +689,7 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
     std::cerr << "bounce took " << (double)time / CLOCKS_PER_SEC << " seconds.\n";
     context.printStats();
     if (savePaths) {
-        save(filename(0, context.ns), context);
+        save(filename(0, context.ns), context.paths, context.numpaths());
     }
 
     for (auto i = 1; i < 8; i++) {
@@ -778,7 +702,7 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
         std::cerr << "bounce " << i << " took " << (double)time / CLOCKS_PER_SEC << " seconds.\n";
         context.printStats();
         if (savePaths) {
-            save(filename(i, context.ns), context);
+            save(filename(i, context.ns), context.paths, context.numpaths());
         }
     }
 }
@@ -786,7 +710,8 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
 
 void fromfile(int bnc, RenderContext &context, int tx, int ty) {
     if (bnc > 0) {
-        load(filename(bnc - 1, context.ns), context);
+        uint32_t numpaths = context.nx * context.ny * context.ns;
+        load(filename(bnc - 1, context.ns), context.paths, numpaths);
     }
 
     clock_t time;
