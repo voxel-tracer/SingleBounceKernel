@@ -76,8 +76,9 @@ void save(const std::string output, const saved_path* paths, uint32_t numpaths) 
     out.close();
 }
 
-std::string filename(int bounce, int ns) {
+std::string filename(int bounce, int ns, bool sorted) {
     std::stringstream str;
     str << "bounce." << ns << "." << bounce << ".sbk";
+    if (sorted) str << ".sorted";
     return str.str();
 }

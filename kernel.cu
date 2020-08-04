@@ -689,7 +689,7 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
     std::cerr << "bounce took " << (double)time / CLOCKS_PER_SEC << " seconds.\n";
     context.printStats();
     if (savePaths) {
-        save(filename(0, context.ns), context.paths, context.numpaths());
+        save(filename(0, context.ns, false), context.paths, context.numpaths());
     }
 
     for (auto i = 1; i < 8; i++) {
@@ -702,16 +702,16 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
         std::cerr << "bounce " << i << " took " << (double)time / CLOCKS_PER_SEC << " seconds.\n";
         context.printStats();
         if (savePaths) {
-            save(filename(i, context.ns), context.paths, context.numpaths());
+            save(filename(i, context.ns, false), context.paths, context.numpaths());
         }
     }
 }
 #endif
 
-void fromfile(int bnc, RenderContext &context, int tx, int ty) {
+void fromfile(int bnc, RenderContext &context, int tx, int ty, bool save, bool sorted) {
     if (bnc > 0) {
         uint32_t numpaths = context.nx * context.ny * context.ns;
-        load(filename(bnc - 1, context.ns), context.paths, numpaths);
+        load(filename(bnc - 1, context.ns, sorted), context.paths, numpaths);
     }
 
     clock_t time;
@@ -721,25 +721,25 @@ void fromfile(int bnc, RenderContext &context, int tx, int ty) {
 #ifdef PRIMARY0
         dim3 blocks((context.nx + tx - 1) / tx, (context.ny + ty - 1) / ty);
         dim3 threads(tx, ty);
-        primaryBounce0 <<<blocks, threads >>> (context, false);
+        primaryBounce0 <<<blocks, threads >>> (context, save);
 #endif
 #ifdef PRIMARY1
         tx = 32; ty = 2;
         dim3 blocks((context.nx * context.ns + tx - 1) / tx, (context.ny + ty - 1) / ty);
         dim3 threads(tx, ty);
-        primaryBounce1 <<<blocks, threads >>> (context, false);
+        primaryBounce1 <<<blocks, threads >>> (context, save);
 #endif
 #ifdef PRIMARY2
         tx = 32; ty = 2;
         dim3 blocks((context.nx * 32 + tx - 1) / tx, (context.ny + ty - 1) / ty);
         dim3 threads(tx, ty);
-        primaryBounce2 <<<blocks, threads >>> (context, false);
+        primaryBounce2 <<<blocks, threads >>> (context, save);
 #endif
     }
     else {
         dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
         dim3 threads(tx, ty);
-        bounce <<<blocks, threads >>> (context, bnc, false);
+        bounce <<<blocks, threads >>> (context, bnc, save);
     }
     CUDA(cudaGetLastError());
     CUDA(cudaDeviceSynchronize());
@@ -763,15 +763,23 @@ int main(int argc, char** argv)
 #endif // PRIMARY_PERFECT
 
     bool save = false;
+    bool sorted = false;
+    int bnc = -1;
+    if (argc > 1) {
+        bnc = strtol(argv[1], NULL, 10);
+        for (auto i = 2; i < argc; i++) {
+            if (!strcmp("--save", argv[i])) save = true;
+            if (!strcmp("--sorted", argv[i])) sorted = true;
+        }
+    }
 
     RenderContext context;
     if (!initRenderContext(context, nx, ny, ns, save)) {
         return -1;
     }
 
-    if (argc > 1) {
-        int bnc = strtol(argv[1], NULL, 10);
-        fromfile(bnc, context, tx, ty);
+    if (bnc >= 0) {
+        fromfile(bnc, context, tx, ty, save, sorted);
     } else {
 #ifdef PRIMARY0
         iterate(context, tx, ty, save);
