@@ -405,10 +405,9 @@ __global__ void bounce(const RenderContext context, int bounce, bool save) {
 
     path p;
     uint32_t id = y * context.nx + x;
-    vec3 color(0, 0, 0);
     for (int s = 0; s < context.ns; s++) {
-        const uint32_t sampleId = id * context.ns + s;
-        saved_path sp = context.paths[sampleId];
+        const uint32_t pid = id * context.ns + s;
+        saved_path sp = context.paths[pid];
         if (sp.isDone()) continue;
 
         p.origin = sp.origin;
@@ -423,18 +422,14 @@ __global__ void bounce(const RenderContext context, int bounce, bool save) {
         p.pixelId = sp.sampleId / context.ns;
 
         colorBounce(context, p);
-        color += p.color;
 #ifdef STATS
         if (isnan(p.color)) context.incStat(NUM_RAYS_NAN);
 #endif
         if (save) {
             // all samples for same pixel are saved in consecutive order
-            context.paths[sampleId] = saved_path(p, sampleId);
+            context.paths[pid] = saved_path(p, sp.sampleId);
+            context.colors[sp.sampleId] = p.color;
         }
-    }
-
-    if (save) {
-        context.colors[p.pixelId] += color / float(context.ns);
     }
 }
 
@@ -477,7 +472,6 @@ __global__ void primaryBounce0(const RenderContext context, bool save) {
     if ((x >= context.nx) || (y >= context.ny)) return;
 
     path p;
-    vec3 color(0, 0, 0);
     p.pixelId = y * context.nx + x;
     p.rng = (wang_hash(p.pixelId) * 336343633) | 1;
 
@@ -495,7 +489,6 @@ __global__ void primaryBounce0(const RenderContext context, bool save) {
         p.bounce = 0;
 
         colorBounce(context, p);
-        color += p.color;
 #ifdef STATS
         if (isnan(p.color)) context.incStat(NUM_RAYS_NAN);
 #endif
@@ -504,11 +497,8 @@ __global__ void primaryBounce0(const RenderContext context, bool save) {
             // all samples for same pixel are saved in consecutive order
             uint32_t sampleId = p.pixelId * context.ns + s;
             context.paths[sampleId] = saved_path(p, sampleId);
+            context.colors[sampleId] = p.color;
         }
-    }
-
-    if (save) {
-        context.colors[p.pixelId] += color / float(context.ns);
     }
 }
 #endif // PRIMARY0
@@ -523,7 +513,6 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
     int s = xs % context.ns;
 
     path p;
-    vec3 color(0, 0, 0);
     p.pixelId = y * context.nx + x;
     int sampleId = p.pixelId * context.ns + s;
     p.rng = (wang_hash(sampleId) * 336343633) | 1;
@@ -541,7 +530,6 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
     p.bounce = 0;
 
     colorBounce(context, p);
-    color += p.color;
 #ifdef STATS
     if (isnan(p.color)) context.incStat(NUM_RAYS_NAN);
 #endif
@@ -550,7 +538,7 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
     if (save) {
         // all samples for same pixel are saved in consecutive order
         context.paths[sampleId] = saved_path(p);
-        context.colors[sampleId] = color;
+        context.colors[sampleId] = p.color;
     }
 }
 #endif // PRIMARY1
@@ -565,7 +553,6 @@ __global__ void primaryBounce2(const RenderContext context, bool save) {
     int s = xs % 32;
 
     path p;
-    vec3 color(0, 0, 0);
     p.pixelId = y * context.nx + x;
     int sampleId = p.pixelId * context.ns + s;
     p.rng = (wang_hash(sampleId) * 336343633) | 1;
@@ -584,7 +571,6 @@ __global__ void primaryBounce2(const RenderContext context, bool save) {
         p.bounce = 0;
 
         colorBounce(context, p);
-        color += p.color;
 #ifdef STATS
         if (isnan(p.color)) context.incStat(NUM_RAYS_NAN);
 #endif
@@ -592,7 +578,7 @@ __global__ void primaryBounce2(const RenderContext context, bool save) {
         if (save) {
             // all samples for same pixel are saved in consecutive order
             context.paths[sampleId] = saved_path(p);
-            context.colors[sampleId] = color;
+            context.colors[sampleId] = p.color;
         }
     }
 }
@@ -623,16 +609,10 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save
     CUDA(cudaMallocManaged((void**)&context.paths, numpaths * sizeof(saved_path)));
 
     if (save) {
-#ifdef PRIMARY0
-        CUDA(cudaMallocManaged((void**)&context.colors, context.nx * context.ny * sizeof(vec3)));
-        memset(context.colors, 0, context.nx * context.ny * sizeof(vec3));
-#endif
-#if defined(PRIMARY1) || defined(PRIMARY2)
-        // to simplify primary1 kernel, store each color sample separately
-        uint32_t size = context.nx * context.ny * context.ns * sizeof(vec3);
+        // store each color sample separately
+        uint32_t size = context.numpaths() * sizeof(vec3);
         CUDA(cudaMallocManaged((void**)&context.colors, size));
         memset(context.colors, 0, size);
-#endif
     }
 
     CUDA(cudaMalloc((void**)&context.tris, ksc.m->numTris * sizeof(triangle)));
@@ -791,13 +771,7 @@ int main(int argc, char** argv)
     }
 
     if (save) {
-#ifdef PRIMARY0
-        writePPM(nx, ny, context.colors);
-#endif
-#if defined(PRIMARY1) || defined(PRIMARY2)
         writePPM(nx, ny, ns, context.colors);
-#endif
-
         CUDA(cudaFree(context.colors));
     }
 
