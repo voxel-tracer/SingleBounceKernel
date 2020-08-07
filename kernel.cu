@@ -32,6 +32,8 @@ using namespace cooperative_groups;
 #define EPSILON 0.01f
 
 #ifdef STATS
+#define COHERENCE
+
 #define NUM_RAYS_PRIMARY                0
 #define NUM_RAYS_PRIMARY_NOHITS         1
 #define NUM_RAYS_PRIMARY_BBOX_NOHITS    2
@@ -97,6 +99,13 @@ struct RenderContext {
 
     uint32_t numpaths() const { return nx * ny * ns; }
 
+#ifdef COHERENCE
+    uint64_t* nodesCount;
+
+    __device__ void countNode(int idx) const {
+        atomicAdd(nodesCount + idx, 1);
+    }
+#endif
 
 #ifdef STATS
     uint64_t* stats;
@@ -113,9 +122,17 @@ struct RenderContext {
     void initStats() {
         CUDA(cudaMallocManaged((void**)&stats, NUM_RAYS_SIZE * sizeof(uint64_t)));
         memset(stats, 0, NUM_RAYS_SIZE * sizeof(uint64_t));
+#ifdef COHERENCE
+        CUDA(cudaMallocManaged((void**)&nodesCount, firstLeafIdx * sizeof(uint64_t)));
+        memset(nodesCount, 0, firstLeafIdx * sizeof(uint64_t));
+#endif
     }
     void resetStats() {
         memset(stats, 0, NUM_RAYS_SIZE * sizeof(uint64_t));
+#ifdef COHERENCE
+        memset(nodesCount, 0, firstLeafIdx * sizeof(uint64_t));
+#endif // COHERENCE
+
     }
     void printStats() const {
         std::cerr << "num rays:\n";
@@ -128,6 +145,20 @@ struct RenderContext {
             std::cerr << statNames[METRIC_ACTIVE] << (stats[METRIC_ACTIVE] * 100.0 / (stats[METRIC_ACTIVE_ITER] * 32)) << std::endl;
         if (stats[METRIC_LEAF_ITER] > 0)
             std::cerr << statNames[METRIC_LEAF] << (stats[METRIC_LEAF] * 100.0 / (stats[METRIC_LEAF_ITER] * 32)) << std::endl;
+#ifdef COHERENCE
+        {
+            uint64_t total = 0;
+            uint64_t unique = 0;
+            for (auto idx = 0; idx < firstLeafIdx; idx++) {
+                if (nodesCount[idx] > 0) {
+                    total += nodesCount[idx];
+                    unique++;
+                }
+            }
+            float coherence = (float)(total) / unique;
+            std::cerr << " coherence           : " << coherence << std::endl;
+        }
+#endif // COHERENCE
     }
 #else
     __device__ void incStat(int type) const {}
@@ -164,6 +195,10 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
 #endif
 
         if (down) {
+#ifdef COHERENCE
+            context.countNode(idx);
+#endif // COHERENCE
+
             bvh_node node = context.bvh[idx];
             if (hit_bbox(node.min(), node.max(), r, closest)) {
                 if (idx >= context.firstLeafIdx) { // leaf node
@@ -698,7 +733,7 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
     clock_t time;
 
     time = clock();
-    primaryBounce0 <<<blocks, threads >>> (context, true);
+    primaryBounce0 <<<blocks, threads >>> (context, savePaths);
     CUDA(cudaGetLastError());
     CUDA(cudaDeviceSynchronize());
     time = clock() - time;
@@ -708,10 +743,10 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
         save(filename(0, context.ns, false), context.paths, context.numpaths());
     }
 
-    for (auto i = 1; i < 8; i++) {
+    for (auto i = 1; i < 1; i++) {
         time = clock();
         context.resetStats();
-        bounce <<<blocks, threads >>> (context, i, true);
+        bounce <<<blocks, threads >>> (context, i, savePaths);
         CUDA(cudaGetLastError());
         CUDA(cudaDeviceSynchronize());
         time = clock() - time;
