@@ -419,7 +419,6 @@ __global__ void bounce(const RenderContext context, int bounce, bool save) {
         p.inside = sp.isInside();
         p.done = false;
         p.bounce = bounce; // only needed by stats
-        p.pixelId = sp.sampleId / context.ns;
 
         colorBounce(context, p);
 #ifdef STATS
@@ -433,14 +432,47 @@ __global__ void bounce(const RenderContext context, int bounce, bool save) {
     }
 }
 
+__global__ void bounceSorted(const RenderContext context, int bounce, bool save) {
+    int xs = threadIdx.x + blockIdx.x * blockDim.x;
+    int y = threadIdx.y + blockIdx.y * blockDim.y;
+    if ((xs >= (context.nx * context.ns)) || (y >= context.ny)) return;
+    //int x = xs / context.ns;
+    //int s = xs % context.ns;
+
+    uint32_t pid = y * context.nx * context.ns + xs;
+    saved_path sp = context.paths[pid];
+    if (sp.isDone()) return;
+
+    path p;
+    p.origin = sp.origin;
+    p.rayDir = sp.rayDir;
+    p.rng = sp.rng;
+    p.attenuation = sp.attenuation;
+    p.color = vec3();
+    p.specular = sp.isSpecular();
+    p.inside = sp.isInside();
+    p.done = false;
+    p.bounce = bounce; // only needed by stats
+
+    colorBounce(context, p);
+#ifdef STATS
+    if (isnan(p.color)) context.incStat(NUM_RAYS_NAN);
+#endif
+    if (save) {
+        // all samples for same pixel are saved in consecutive order
+        context.paths[pid] = saved_path(p, sp.sampleId);
+        context.colors[sp.sampleId] = p.color;
+    }
+}
+
 __global__ void primary(const RenderContext context) {
     int x = threadIdx.x + blockIdx.x * blockDim.x;
     int y = threadIdx.y + blockIdx.y * blockDim.y;
     if ((x >= context.nx) || (y >= context.ny)) return;
 
     path p;
-    p.pixelId = y * context.nx + x;
-    p.rng = (wang_hash(p.pixelId) * 336343633) | 1;
+    uint32_t pixelId = y * context.nx + x;
+    p.rng = (wang_hash(pixelId) * 336343633) | 1;
 
     for (int s = 0; s < context.ns; s++) {
         float u = float(x + rnd(p.rng)) / float(context.nx);
@@ -453,7 +485,7 @@ __global__ void primary(const RenderContext context) {
         p.inside = false;
         p.done = false;
         // all samples for same pixel are saved in consecutive order
-        uint32_t sampleId = p.pixelId * context.ns + s;
+        uint32_t sampleId = pixelId * context.ns + s;
         context.paths[sampleId] = saved_path(p, sampleId);
     }
 }
@@ -472,8 +504,8 @@ __global__ void primaryBounce0(const RenderContext context, bool save) {
     if ((x >= context.nx) || (y >= context.ny)) return;
 
     path p;
-    p.pixelId = y * context.nx + x;
-    p.rng = (wang_hash(p.pixelId) * 336343633) | 1;
+    uint32_t pixelId = y * context.nx + x;
+    p.rng = (wang_hash(pixelId) * 336343633) | 1;
 
     for (int s = 0; s < context.ns; s++) {
         float u = float(x + rnd(p.rng)) / float(context.nx);
@@ -495,7 +527,7 @@ __global__ void primaryBounce0(const RenderContext context, bool save) {
 
         if (save) {
             // all samples for same pixel are saved in consecutive order
-            uint32_t sampleId = p.pixelId * context.ns + s;
+            uint32_t sampleId = pixelId * context.ns + s;
             context.paths[sampleId] = saved_path(p, sampleId);
             context.colors[sampleId] = p.color;
         }
@@ -513,8 +545,8 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
     int s = xs % context.ns;
 
     path p;
-    p.pixelId = y * context.nx + x;
-    int sampleId = p.pixelId * context.ns + s;
+    uint32_t pixelId = y * context.nx + x;
+    int sampleId = pixelId * context.ns + s;
     p.rng = (wang_hash(sampleId) * 336343633) | 1;
 
     float u = float(x + rnd(p.rng)) / float(context.nx);
@@ -553,8 +585,8 @@ __global__ void primaryBounce2(const RenderContext context, bool save) {
     int s = xs % 32;
 
     path p;
-    p.pixelId = y * context.nx + x;
-    int sampleId = p.pixelId * context.ns + s;
+    uint32_t pixelId = y * context.nx + x;
+    int sampleId = pixelId * context.ns + s;
     p.rng = (wang_hash(sampleId) * 336343633) | 1;
 
     for (; s < context.ns; s+= 32) {
@@ -721,9 +753,16 @@ void fromfile(int bnc, RenderContext &context, int tx, int ty, bool save, bool s
 #endif
     }
     else {
-        dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
-        dim3 threads(tx, ty);
-        bounce <<<blocks, threads >>> (context, bnc, save);
+        if (sorted) {
+            tx = 32; ty = 2;
+            dim3 blocks((context.nx * context.ns + tx - 1) / tx, (context.ny + ty - 1) / ty);
+            dim3 threads(tx, ty);
+            bounceSorted <<<blocks, threads >>> (context, bnc, save);
+        } else {
+            dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
+            dim3 threads(tx, ty);
+            bounce <<<blocks, threads >>> (context, bnc, save);
+        }
     }
     CUDA(cudaGetLastError());
     CUDA(cudaDeviceSynchronize());
