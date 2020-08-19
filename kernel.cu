@@ -14,6 +14,10 @@
 //#define PRIMARY1
 //#define PRIMARY2
 
+#define SAVE_BITSTACK
+
+#define DUAL_NODES
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -156,7 +160,7 @@ struct RenderContext {
                 }
             }
             float coherence = (float)(total) / unique;
-            std::cerr << " coherence           : " << coherence << std::endl;
+            std::cerr << " coherence           : " << coherence << "(" << total << "/" << unique << ")" << std::endl;
         }
 #endif // COHERENCE
     }
@@ -177,7 +181,89 @@ enum OBJ_ID {
     LIGHT
 };
 
-__device__ float hitBvh(const ray& r, const RenderContext& context, float t_min, tri_hit& rec, bool isShadow) {
+#ifdef DUAL_NODES
+
+__device__ void pop_bitstack(unsigned int& bitStack, int& idx) {
+    int m = __ffsll(bitStack) - 1;
+    bitStack = (bitStack >> m) ^ 1;
+    idx = (idx >> m) ^ 1;
+}
+
+__device__ float hitBvh(const ray& r, const RenderContext& context, float t_min, tri_hit& rec, bool isShadow, bool isDebug) {
+    int idx = 1;
+    float closest = FLT_MAX;
+    unsigned int bitStack = 1;
+
+    while (idx) {
+#ifdef STATS
+        /*if (isShadow)*/ {
+            auto g = coalesced_threads();
+            if (g.thread_rank() == 0) {
+                context.incStat(METRIC_ACTIVE_ITER);
+                context.incStat(METRIC_ACTIVE, g.size());
+            }
+        }
+#endif
+        if (idx < context.firstLeafIdx) { // internal node
+            // load both children nodes
+            int idx2 = idx << 1;
+#ifdef COHERENCE
+            context.countNode(idx2);
+            context.countNode(idx2 + 1);
+#endif // COHERENCE
+            bvh_node left = context.bvh[idx2];
+            float leftHit = hit_bbox_dist(left.min(), left.max(), r, closest);
+            bool traverseLeft = leftHit < closest;
+            bvh_node right = context.bvh[idx2 + 1];
+            float rightHit = hit_bbox_dist(right.min(), right.max(), r, closest);
+            bool traverseRight = rightHit < closest;
+            bool swap = rightHit < leftHit;
+            if (traverseLeft && traverseRight) {
+                idx = idx2 + (swap ? 1 : 0);
+                bitStack = (bitStack << 1) + 1;
+            }
+            else if (traverseLeft || traverseRight) {
+                idx = idx2 + (swap ? 1 : 0);
+                bitStack = bitStack << 1;
+            }
+            else {
+                pop_bitstack(bitStack, idx);
+            }
+        }
+        else { // leaf node
+#ifdef STATS
+            /*if (isShadow)*/ {
+                auto g = coalesced_threads();
+                if (g.thread_rank() == 0) {
+                    context.incStat(METRIC_LEAF_ITER);
+                    context.incStat(METRIC_LEAF, g.size());
+                }
+            }
+#endif
+            int first = (idx - context.firstLeafIdx) * context.numPrimitivesPerLeaf;
+            for (auto i = 0; i < context.numPrimitivesPerLeaf; i++) {
+                const triangle tri = context.tris[first + i];
+                if (isinf(tri.v[0].x()))
+                    break; // we reached the end of the primitives buffer
+                float u, v;
+                float hitT = triangleHit(tri, r, t_min, closest, u, v);
+                if (hitT < closest) {
+                    if (isShadow) return 0.0f;
+
+                    closest = hitT;
+                    rec.triId = first + i;
+                    rec.u = u;
+                    rec.v = v;
+                }
+            }
+            pop_bitstack(bitStack, idx);
+        }
+    }
+
+    return closest;
+}
+#else
+__device__ float hitBvh(const ray& r, const RenderContext& context, float t_min, tri_hit& rec, bool isShadow, bool isDebug) {
     bool down = true;
     int idx = 1;
     float closest = FLT_MAX;
@@ -193,15 +279,16 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
             }
         }
 #endif
-
         if (down) {
 #ifdef COHERENCE
             context.countNode(idx);
 #endif // COHERENCE
-
             bvh_node node = context.bvh[idx];
             if (hit_bbox(node.min(), node.max(), r, closest)) {
                 if (idx >= context.firstLeafIdx) { // leaf node
+#ifdef PATH_DBG
+                    if (isDebug) printf("LEAF HIT\n");
+#endif // PATH_DBG
 #ifdef STATS
                     /*if (isShadow)*/ {
                         auto g = coalesced_threads();
@@ -211,7 +298,6 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
                         }
                     }
 #endif
-
                     int first = (idx - context.firstLeafIdx) * context.numPrimitivesPerLeaf;
                     for (auto i = 0; i < context.numPrimitivesPerLeaf; i++) {
                         const triangle tri = context.tris[first + i];
@@ -226,18 +312,29 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
                             rec.triId = first + i;
                             rec.u = u;
                             rec.v = v;
+                            //rec.bitstack = bitStack;
                         }
                     }
                     down = false;
                 }
                 else { // internal node
-                 // current -> left or right
+#ifdef PATH_DBG
+                    if (isDebug) printf("DOWN ");
+#endif // PATH_DBG
+                    // current -> left or right
                     const int childIdx = signbit(r.direction()[node.split_axis()]); // 0=left, 1=right
                     bitStack = (bitStack << 1) + childIdx; // push current child idx in the stack
                     idx = (idx << 1) + childIdx;
                 }
             }
             else { // ray didn't intersect the node, backtrack
+#ifdef PATH_DBG
+                if (idx >= context.firstLeafIdx) { // leaf node
+                    if (isDebug) printf("LEAF MISS\n");
+                } else {
+                    if (isDebug) printf("NODE MISS\n");
+                }
+#endif // PATH_DBG
                 down = false;
             }
         }
@@ -247,10 +344,16 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
         else { // back tracking
             const int currentChildIdx = bitStack & 1;
             if ((idx & 1) == currentChildIdx) { // node == current child, visit sibling
+#ifdef PATH_DBG
+                if (isDebug) printf("RIGHT ");
+#endif // PATH_DBG
                 idx += -2 * currentChildIdx + 1; // node = node.sibling
                 down = true;
             }
             else { // we visited both siblings, backtrack
+#ifdef PATH_DBG
+                if (isDebug) printf("BACK ");
+#endif // PATH_DBG
                 bitStack = bitStack >> 1;
                 idx = idx >> 1; // node = node.parent
             }
@@ -259,8 +362,9 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
 
     return closest;
 }
+#endif
 
-__device__ float hitMesh(const ray& r, const RenderContext& context, float t_min, float t_max, tri_hit& rec, bool primary, bool isShadow) {
+__device__ float hitMesh(const ray& r, const RenderContext& context, float t_min, float t_max, tri_hit& rec, bool primary, bool isShadow, bool isDebug) {
     if (!hit_bbox(context.bounds.min, context.bounds.max, r, t_max)) {
 #ifdef STATS
         if (isShadow) context.incStat(NUM_RAYS_SHADOWS_BBOX_NOHITS);
@@ -269,7 +373,7 @@ __device__ float hitMesh(const ray& r, const RenderContext& context, float t_min
         return FLT_MAX;
     }
 
-    return hitBvh(r, context, t_min, rec, isShadow);
+    return hitBvh(r, context, t_min, rec, isShadow, isDebug);
 }
 
 __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, intersection& inters) {
@@ -277,7 +381,7 @@ __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, 
     tri_hit triHit;
     bool primary = p.bounce == 0;
     inters.objId = NONE;
-    if ((inters.t = hitMesh(r, context, EPSILON, FLT_MAX, triHit, primary, isShadow)) < FLT_MAX) {
+    if ((inters.t = hitMesh(r, context, EPSILON, FLT_MAX, triHit, primary, isShadow, false)) < FLT_MAX) {
         if (isShadow) return true; // we don't need to compute the intersection details for shadow rays
 
         inters.objId = TRIMESH;
@@ -286,6 +390,7 @@ __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, 
         inters.normal = unit_vector(cross(tri.v[1] - tri.v[0], tri.v[2] - tri.v[0]));
         inters.texCoords[0] = (triHit.u * tri.texCoords[1 * 2 + 0] + triHit.v * tri.texCoords[2 * 2 + 0] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 0]);
         inters.texCoords[1] = (triHit.u * tri.texCoords[1 * 2 + 1] + triHit.v * tri.texCoords[2 * 2 + 1] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 1]);
+        inters.bitstack = triHit.bitstack;
     }
     else {
         if (isShadow) return false; // shadow rays only care about the main triangle mesh
@@ -406,6 +511,7 @@ __device__ void colorBounce(const RenderContext& context, path& p) {
         p.attenuation *= scatter.throughput;
         p.specular = scatter.specular;
         p.inside = scatter.refracted ? !p.inside : p.inside;
+        p.bitstack = inters.bitstack;
 
         //p.color = p.attenuation; // debug
 #ifdef SHADOW
@@ -442,6 +548,9 @@ __global__ void bounce(const RenderContext context, int bounce, bool save) {
     uint32_t id = y * context.nx + x;
     for (int s = 0; s < context.ns; s++) {
         const uint32_t pid = id * context.ns + s;
+#ifdef PATH_DBG
+        p.dbg = pid == (128 * context.nx + 100) * context.ns + 10;
+#endif
         saved_path sp = context.paths[pid];
         if (sp.isDone()) continue;
 
@@ -604,7 +713,7 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
     // following code is not used, but leave it here for now in case compiler is smart enough to undo all our work if we don't save anything
     if (save) {
         // all samples for same pixel are saved in consecutive order
-        context.paths[sampleId] = saved_path(p);
+        context.paths[sampleId] = saved_path(p, sampleId);
         context.colors[sampleId] = p.color;
     }
 }
@@ -726,14 +835,62 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save
 }
 
 #ifdef PRIMARY0
-void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
+#ifdef SAVE_BITSTACK
+void iterate(RenderContext& context, int tx, int ty, bool savePaths) {
+    dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
+    dim3 threads(tx, ty);
+
+    clock_t time;
+
+    // when storing bitstack we need to make a copy of the paths until we collect their bitstacks in the next bounce then we can save them
+    saved_path* paths = NULL;
+    if (savePaths) {
+        paths = new saved_path[context.numpaths()];
+    }
+
+    time = clock();
+    primaryBounce0 << <blocks, threads >> > (context, savePaths);
+    CUDA(cudaGetLastError());
+    CUDA(cudaDeviceSynchronize());
+    time = clock() - time;
+    std::cerr << "bounce took " << (double)time / CLOCKS_PER_SEC << " seconds.\n";
+    context.printStats();
+    if (savePaths) {
+        // just copy the paths but do not save them
+        memcpy((void*)paths, (void*)context.paths, context.numpaths() * sizeof(saved_path));
+    }
+
+    // even though we only save 7 bounces, we need to trace the 8th bounce to collect the bitstacks
+    for (auto i = 1; i <= 8; i++) {
+        time = clock();
+        context.resetStats();
+        bounce << <blocks, threads >> > (context, i, savePaths);
+        CUDA(cudaGetLastError());
+        CUDA(cudaDeviceSynchronize());
+        time = clock() - time;
+        std::cerr << "bounce " << i << " took " << (double)time / CLOCKS_PER_SEC << " seconds.\n";
+        context.printStats();
+        if (savePaths) {
+            // copy bitstacks from context.paths to paths
+            for (auto j = 0; j < context.numpaths(); j++) {
+                paths[j].bitstack = context.paths[j].bitstack;
+            }
+            // now we can save previous bounce's paths
+            save(filename(i - 1, context.ns, false), paths, context.numpaths());
+            // copy current paths to local variable
+            memcpy((void*)paths, (void*)context.paths, context.numpaths() * sizeof(saved_path));
+        }
+    }
+}
+#else
+void iterate(RenderContext& context, int tx, int ty, bool savePaths) {
     dim3 blocks(context.nx / tx + 1, context.ny / ty + 1);
     dim3 threads(tx, ty);
 
     clock_t time;
 
     time = clock();
-    primaryBounce0 <<<blocks, threads >>> (context, savePaths);
+    primaryBounce0 << <blocks, threads >> > (context, savePaths);
     CUDA(cudaGetLastError());
     CUDA(cudaDeviceSynchronize());
     time = clock() - time;
@@ -746,7 +903,7 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
     for (auto i = 1; i < 1; i++) {
         time = clock();
         context.resetStats();
-        bounce <<<blocks, threads >>> (context, i, savePaths);
+        bounce << <blocks, threads >> > (context, i, savePaths);
         CUDA(cudaGetLastError());
         CUDA(cudaDeviceSynchronize());
         time = clock() - time;
@@ -757,6 +914,7 @@ void iterate(RenderContext &context, int tx, int ty, bool savePaths) {
         }
     }
 }
+#endif // SAVE_BITSTACK
 #endif
 
 void fromfile(int bnc, RenderContext &context, int tx, int ty, bool save, bool sorted) {

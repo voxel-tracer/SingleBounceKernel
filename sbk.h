@@ -35,9 +35,17 @@ struct saved_path {
     uint32_t sampleId;
     uint8_t flags;
     rand_state rng;
+#ifdef SAVE_BITSTACK
+    unsigned int bitstack = 0;
+#endif // SAVE_BITSTACK
+
 
     __host__ saved_path() {}
-    __device__ saved_path(const path& p, uint32_t sampleId) : origin(p.origin), rayDir(p.rayDir), flags(FLAGS(p)), attenuation(p.attenuation), rng(p.rng), sampleId(sampleId) {}
+    __device__ saved_path(const path& p, uint32_t sampleId) : origin(p.origin), rayDir(p.rayDir), flags(FLAGS(p)), attenuation(p.attenuation), rng(p.rng), sampleId(sampleId) {
+#ifdef SAVE_BITSTACK
+        bitstack = p.bitstack;
+#endif // SAVE_BITSTACK
+    }
 
     __device__ bool isDone() const { return flags & FLAG_DONE; }
     __device__ bool isSpecular() const { return flags & FLAG_SPECULAR; }
@@ -45,9 +53,10 @@ struct saved_path {
 };
 
 // SBK_00.02: added sampleId
+// SBK_00.03: added bitstack
 bool load(const std::string input, saved_path* paths, uint32_t expectedNumPaths) {
     std::fstream in(input, std::ios::in | std::ios::binary);
-    const char* HEADER = "SBK_00.02";
+    const char* HEADER = "SBK_00.03";
     char* header = new char[sizeof(HEADER)];
     in.read(header, sizeof(HEADER));
     if (!strcmp(HEADER, header)) {
@@ -71,7 +80,7 @@ bool load(const std::string input, saved_path* paths, uint32_t expectedNumPaths)
 
 void save(const std::string output, const saved_path* paths, uint32_t numpaths) {
     std::fstream out(output, std::ios::out | std::ios::binary);
-    const char* HEADER = "SBK_00.02";
+    const char* HEADER = "SBK_00.03";
     out.write(HEADER, sizeof(HEADER));
     out.write((char*)&numpaths, sizeof(uint32_t));
     out.write((char*)paths, sizeof(saved_path) * numpaths);
