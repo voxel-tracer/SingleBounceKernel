@@ -36,7 +36,7 @@ using namespace cooperative_groups;
 #define EPSILON 0.01f
 
 #ifdef STATS
-#define COHERENCE
+//#define COHERENCE
 
 #define NUM_RAYS_PRIMARY                0
 #define NUM_RAYS_PRIMARY_NOHITS         1
@@ -252,6 +252,9 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
 
                     closest = hitT;
                     rec.triId = first + i;
+#ifdef SAVE_BITSTACK
+                    rec.bitstack = bitStack;
+#endif // SAVE_BITSTACK
                     rec.u = u;
                     rec.v = v;
                 }
