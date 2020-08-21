@@ -10,8 +10,8 @@
 #define TEXTURES
 
 //#define PRIMARY_PERFECT
-#define PRIMARY0
-//#define PRIMARY1
+//#define PRIMARY0
+#define PRIMARY1
 //#define PRIMARY2
 
 #define SAVE_BITSTACK
@@ -52,11 +52,14 @@ using namespace cooperative_groups;
 #define NUM_RAYS_RUSSIAN_KILL           11
 #define NUM_RAYS_NAN                    12
 #define NUM_RAYS_MAX_TRAVERSED_NODES    13
-#define METRIC_ACTIVE                   14
-#define METRIC_ACTIVE_ITER              15
-#define METRIC_LEAF                     16
-#define METRIC_LEAF_ITER                17
-#define NUM_RAYS_SIZE                   18
+#define METRIC_NUM_INTERNAL             14
+#define METRIC_NUM_LEAVES               15
+#define METRIC_NUM_LEAF_HITS            16
+#define METRIC_ACTIVE                   17
+#define METRIC_ACTIVE_ITER              18
+#define METRIC_LEAF                     19
+#define METRIC_LEAF_ITER                20
+#define NUM_RAYS_SIZE                   21
 
 char* statNames[NUM_RAYS_SIZE] = {
     " primary             : ",
@@ -71,8 +74,11 @@ char* statNames[NUM_RAYS_SIZE] = {
     " power < 0.01        : ",
     " exceeded max bounce : ",
     " russiand roulette   : ",
-    " max travers. nodes  : ",
     " *** NANs ***        : ",
+    " max travers. nodes  : ",
+    " num internal nodes  : ",
+    " num leaf nodes      : ",
+    " num leaf hits       : ",
     " active metric       : ",
     " active.iterations   : ",
     " leaf metric         : ",
@@ -205,6 +211,10 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
         }
 #endif
         if (idx < context.firstLeafIdx) { // internal node
+#ifdef STATS
+            context.incStat(METRIC_NUM_INTERNAL, 2);
+#endif // STATS
+
             // load both children nodes
             int idx2 = idx << 1;
 #ifdef COHERENCE
@@ -239,8 +249,12 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
                     context.incStat(METRIC_LEAF, g.size());
                 }
             }
+            context.incStat(METRIC_NUM_LEAVES);
 #endif
             int first = (idx - context.firstLeafIdx) * context.numPrimitivesPerLeaf;
+#ifdef STATS
+            bool found = false;
+#endif // STATS
             for (auto i = 0; i < context.numPrimitivesPerLeaf; i++) {
                 const triangle tri = context.tris[first + i];
                 if (isinf(tri.v[0].x()))
@@ -249,7 +263,7 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
                 float hitT = triangleHit(tri, r, t_min, closest, u, v);
                 if (hitT < closest) {
                     if (isShadow) return 0.0f;
-
+                    found = true;
                     closest = hitT;
                     rec.triId = first + i;
 #ifdef SAVE_BITSTACK
@@ -260,6 +274,10 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
                 }
             }
             pop_bitstack(bitStack, idx);
+#ifdef STATS
+            if (found) context.incStat(METRIC_NUM_LEAF_HITS);
+#endif // STATS
+
         }
     }
 
