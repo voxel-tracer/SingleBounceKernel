@@ -19,7 +19,7 @@
 #define DUAL_NODES
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include "../cuda-raytracing-optimized/stb_image.h"
 
 #include "sbk.h"
 
@@ -55,34 +55,40 @@ using namespace cooperative_groups;
 #define METRIC_NUM_INTERNAL             14
 #define METRIC_NUM_LEAVES               15
 #define METRIC_NUM_LEAF_HITS            16
-#define METRIC_ACTIVE                   17
-#define METRIC_ACTIVE_ITER              18
-#define METRIC_LEAF                     19
-#define METRIC_LEAF_ITER                20
-#define NUM_RAYS_SIZE                   21
+#define METRIC_MAX_NUM_INTERNAL         17
+#define METRIC_MAX_NUM_LEAVES           18
+#define METRIC_NUM_HIGH_LEAVES          19
+#define METRIC_ACTIVE                   20
+#define METRIC_ACTIVE_ITER              21
+#define METRIC_LEAF                     22
+#define METRIC_LEAF_ITER                23
+#define NUM_RAYS_SIZE                   24
 
 char* statNames[NUM_RAYS_SIZE] = {
-    " primary             : ",
-    " primary no hit      : ",
-    " primary bb nohit    : ",
-    " secondary           : ",
-    " secondary no hit    : ",
-    " secondary bb nohit  : ",
-    " shadows             : ",
-    " shadows nohit       : ",
-    " shadows bb nohit    : ",
-    " power < 0.01        : ",
-    " exceeded max bounce : ",
-    " russiand roulette   : ",
-    " *** NANs ***        : ",
-    " max travers. nodes  : ",
-    " num internal nodes  : ",
-    " num leaf nodes      : ",
-    " num leaf hits       : ",
-    " active metric       : ",
-    " active.iterations   : ",
-    " leaf metric         : ",
-    " leaf.iterations     : ",
+    " primary                     : ",
+    " primary no hit              : ",
+    " primary bb nohit            : ",
+    " secondary                   : ",
+    " secondary no hit            : ",
+    " secondary bb nohit          : ",
+    " shadows                     : ",
+    " shadows nohit               : ",
+    " shadows bb nohit            : ",
+    " power < 0.01                : ",
+    " exceeded max bounce         : ",
+    " russiand roulette           : ",
+    " *** NANs ***                : ",
+    " max travers. nodes          : ",
+    " num internal nodes          : ",
+    " num leaf nodes              : ",
+    " num leaf hits               : ",
+    " max num internal            : ",
+    " max num leaves              : ",
+    " num paths with large leaves : ",
+    " active metric               : ",
+    " active.iterations           : ",
+    " leaf metric                 : ",
+    " leaf.iterations             : ",
 };
 #endif
 
@@ -195,10 +201,18 @@ __device__ void pop_bitstack(unsigned int& bitStack, int& idx) {
     idx = (idx >> m) ^ 1;
 }
 
-__device__ float hitBvh(const ray& r, const RenderContext& context, float t_min, tri_hit& rec, bool isShadow, bool isDebug) {
+#ifdef PATH_DBG
+__device__ float hitBvh(const ray& r, const RenderContext& context, float t_min, tri_hit& rec, bool isShadow, bool isDebug, uint64_t sampleId) {
+#else
+__device__ float hitBvh(const ray & r, const RenderContext & context, float t_min, tri_hit & rec, bool isShadow) {
+#endif // PATH_DBG
     int idx = 1;
     float closest = FLT_MAX;
     unsigned int bitStack = 1;
+#ifdef STATS
+    uint64_t numLeaves = 0;
+    uint64_t numInternal = 0;
+#endif // STATS
 
     while (idx) {
 #ifdef STATS
@@ -212,7 +226,7 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
 #endif
         if (idx < context.firstLeafIdx) { // internal node
 #ifdef STATS
-            context.incStat(METRIC_NUM_INTERNAL, 2);
+            numInternal += 2;
 #endif // STATS
 
             // load both children nodes
@@ -249,7 +263,7 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
                     context.incStat(METRIC_LEAF, g.size());
                 }
             }
-            context.incStat(METRIC_NUM_LEAVES);
+            numLeaves++;
 #endif
             int first = (idx - context.firstLeafIdx) * context.numPrimitivesPerLeaf;
 #ifdef STATS
@@ -263,7 +277,9 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
                 float hitT = triangleHit(tri, r, t_min, closest, u, v);
                 if (hitT < closest) {
                     if (isShadow) return 0.0f;
+#ifdef STATS
                     found = true;
+#endif // STATS
                     closest = hitT;
                     rec.triId = first + i;
 #ifdef SAVE_BITSTACK
@@ -280,6 +296,17 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
 
         }
     }
+
+#ifdef STATS
+    context.incStat(METRIC_NUM_INTERNAL, numInternal);
+    context.incStat(METRIC_NUM_LEAVES, numLeaves);
+
+    context.maxStat(METRIC_MAX_NUM_LEAVES, numLeaves);
+    context.maxStat(METRIC_MAX_NUM_INTERNAL, numInternal);
+
+    if (numLeaves > 199) context.incStat(METRIC_NUM_HIGH_LEAVES);
+#endif // STATS
+
 
     return closest;
 }
@@ -385,7 +412,11 @@ __device__ float hitBvh(const ray& r, const RenderContext& context, float t_min,
 }
 #endif
 
-__device__ float hitMesh(const ray& r, const RenderContext& context, float t_min, float t_max, tri_hit& rec, bool primary, bool isShadow, bool isDebug) {
+#ifdef PATH_DBG
+__device__ float hitMesh(const ray& r, const RenderContext& context, float t_min, float t_max, tri_hit& rec, bool primary, bool isShadow, bool isDebug, uint64_t sampleId) {
+#else
+__device__ float hitMesh(const ray & r, const RenderContext & context, float t_min, float t_max, tri_hit & rec, bool primary, bool isShadow) {
+#endif // PATH_DBG
     if (!hit_bbox(context.bounds.min, context.bounds.max, r, t_max)) {
 #ifdef STATS
         if (isShadow) context.incStat(NUM_RAYS_SHADOWS_BBOX_NOHITS);
@@ -394,7 +425,11 @@ __device__ float hitMesh(const ray& r, const RenderContext& context, float t_min
         return FLT_MAX;
     }
 
-    return hitBvh(r, context, t_min, rec, isShadow, isDebug);
+#ifdef PATH_DBG
+    return hitBvh(r, context, t_min, rec, isShadow, isDebug, sampleId);
+#else
+    return hitBvh(r, context, t_min, rec, isShadow);
+#endif // PATH_DBG
 }
 
 __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, intersection& inters) {
@@ -402,7 +437,13 @@ __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, 
     tri_hit triHit;
     bool primary = p.bounce == 0;
     inters.objId = NONE;
-    if ((inters.t = hitMesh(r, context, EPSILON, FLT_MAX, triHit, primary, isShadow, false)) < FLT_MAX) {
+#ifdef PATH_DBG
+    inters.t = hitMesh(r, context, EPSILON, FLT_MAX, triHit, primary, isShadow, p.dbg, p.sampleId);
+#else
+    inters.t = hitMesh(r, context, EPSILON, FLT_MAX, triHit, primary, isShadow);
+#endif // PATH_DBG
+
+    if (inters.t < FLT_MAX) {
         if (isShadow) return true; // we don't need to compute the intersection details for shadow rays
 
         inters.objId = TRIMESH;
@@ -725,6 +766,11 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
     p.inside = false;
     p.done = false;
     p.bounce = 0;
+#ifdef PATH_DBG
+    p.sampleId = sampleId;
+    p.dbg = false;
+#endif // PATH_DBG
+
 
     colorBounce(context, p);
 #ifdef STATS
