@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <bitset>
 #include <time.h>
+#include <algorithm>
+
+//#define MARK_TRIANGLES
 
 #define STATS
 //#define RUSSIAN_ROULETTE
@@ -101,6 +104,9 @@ struct RenderContext {
     sphere light = sphere(vec3(52.514355, 715.686951, -272.620972), 50);
     vec3 lightColor = vec3(1, 1, 1) * 80;
     triangle* tris;
+#ifdef MARK_TRIANGLES
+    uint8_t* markIndices;
+#endif // MARK_TRIANGLES
     material* materials;
     bbox bounds;
     bvh_node* bvh;
@@ -267,6 +273,9 @@ __device__ float hitBvh(const ray & r, const RenderContext & context, float t_mi
 #endif
             int first = (idx - context.firstLeafIdx) * context.numPrimitivesPerLeaf;
 #ifdef STATS
+#ifdef PATH_DBG
+            //if (isDebug) printf("%d\n", first);
+#endif // PATH_DBG
             bool found = false;
 #endif // STATS
             for (auto i = 0; i < context.numPrimitivesPerLeaf; i++) {
@@ -306,7 +315,6 @@ __device__ float hitBvh(const ray & r, const RenderContext & context, float t_mi
 
     if (numLeaves > 199) context.incStat(METRIC_NUM_HIGH_LEAVES);
 #endif // STATS
-
 
     return closest;
 }
@@ -449,6 +457,7 @@ __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, 
         inters.objId = TRIMESH;
         triangle tri = context.tris[triHit.triId];
         inters.meshID = tri.meshID;
+        inters.triID = triHit.triId;
         inters.normal = unit_vector(cross(tri.v[1] - tri.v[0], tri.v[2] - tri.v[0]));
         inters.texCoords[0] = (triHit.u * tri.texCoords[1 * 2 + 0] + triHit.v * tri.texCoords[2 * 2 + 0] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 0]);
         inters.texCoords[1] = (triHit.u * tri.texCoords[1 * 2 + 1] + triHit.v * tri.texCoords[2 * 2 + 1] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 1]);
@@ -504,6 +513,22 @@ __device__ bool generateShadowRay(const RenderContext& context, path& p, const i
 }
 #endif
 
+#ifdef MARK_TRIANGLES
+__device__ vec3 hsv2rgb(float h, float s, float v) {
+    int h_i = (h * 6);
+    float f = h * 6 - h_i;
+    float p = v * (1 - s);
+    float q = v * (1 - f * s);
+    float t = v * (1 - (1 - f) * s);
+    if (h_i == 0) return vec3(v, t, p);
+    if (h_i == 1) return vec3(q, v, p);
+    if (h_i == 2) return vec3(p, v, t);
+    if (h_i == 3) return vec3(p, q, v);
+    if (h_i == 4) return vec3(t, p, v);
+    return vec3(v, p, q);
+}
+#endif // MARK_TRIANGLES
+
 // only handles a single bounce, as such doesn't track when a path exceeds max depth
 __device__ void colorBounce(const RenderContext& context, path& p) {
         intersection inters;
@@ -537,7 +562,15 @@ __device__ void colorBounce(const RenderContext& context, path& p) {
 
         inters.inside = p.inside;
         scatter_info scatter(inters);
+#ifdef MARK_TRIANGLES
+        if (inters.objId == TRIMESH && context.markIndices[inters.triID]) {
+            uint8_t marker = context.markIndices[inters.triID];
+            float hue = marker / 299.0f;
+            p.color = hsv2rgb(hue, 0.5, 0.95);
+        } else if (inters.objId == TRIMESH) {
+#else
         if (inters.objId == TRIMESH) {
+#endif // MARK_TRIANGLES
             const material& mat = context.materials[inters.meshID];
 #ifdef TEXTURES
             vec3 albedo;
@@ -574,8 +607,6 @@ __device__ void colorBounce(const RenderContext& context, path& p) {
         p.specular = scatter.specular;
         p.inside = scatter.refracted ? !p.inside : p.inside;
         p.bitstack = inters.bitstack;
-
-        //p.color = p.attenuation; // debug
 #ifdef SHADOW
         // trace shadow ray for diffuse rays
         if (!p.specular && generateShadowRay(context, p, inters)) {
@@ -768,9 +799,8 @@ __global__ void primaryBounce1(const RenderContext context, bool save) {
     p.bounce = 0;
 #ifdef PATH_DBG
     p.sampleId = sampleId;
-    p.dbg = false;
+    p.dbg = sampleId == 7402054;
 #endif // PATH_DBG
-
 
     colorBounce(context, p);
 #ifdef STATS
@@ -827,6 +857,25 @@ __global__ void primaryBounce2(const RenderContext context, bool save) {
 }
 #endif // PRIMARY2
 
+#ifdef MARK_TRIANGLES
+uint64_t markedTris[] ={
+    134806, 134807, 134815, 134814, 134813, 134812, 134811, 134810, 134809, 134808, 134835, 134834, 134833, 134832, 134816, 134817, 134818, 134819, 134862, 134861, 134860, 134859,
+    134858, 134857, 134856, 134848, 134849, 134850, 134851, 134852, 134853, 134895, 134894, 134893, 134892, 134891, 134890, 134889, 134888, 134887, 134886, 134885, 134884, 134883,
+    134882, 134881, 134880, 134896, 65616, 86021, 88140, 88141, 88139, 88138, 88137, 88136, 88133, 88132, 88135, 88134, 88131, 88130, 88128, 88129, 88093, 88092, 88095, 88094, 88089,
+    88088, 88090, 88091, 88087, 88086, 88085, 88084, 88083, 88082, 88081, 88080, 88067, 88066, 88069, 88068, 88070, 88071, 88072, 128768, 124695, 124694, 124693, 124697, 124696,
+    124698, 124680, 124681, 124676, 124677, 124679, 124678, 124522, 124523, 124521, 124520, 124527, 124526, 124524, 124525, 124519, 124518, 124517, 124516, 124515, 124514, 124513,
+    124512, 124536, 124537, 124538, 124539, 124540, 124541, 124542, 124543, 124531, 124530, 124529, 124528, 124532, 124533, 124534, 124535, 124495, 124494, 124493, 124492, 124491,
+    124490, 124489, 124488, 124487, 124486, 124485, 124484, 124480, 124481, 124482, 124483, 124504, 124505, 124506, 124507, 124510, 124511, 124509, 124508, 124503, 124448, 124449,
+    124450, 124451, 124452, 124453, 124455, 124454, 124461, 124460, 124456, 124457, 124459, 124458, 124466, 124467, 124465, 124464, 124468, 124469, 124470, 124471, 124472, 124473,
+    124474, 124475, 124476, 124477, 124478, 124479, 124422, 124423, 124424, 124425, 124426, 124427, 124428, 124429, 124430, 124431, 124432, 124433, 124434, 124435, 124436, 124437,
+    124438, 124439, 124440, 124441, 124442, 124443, 124444, 124445, 124446, 124447, 124545, 124544, 124546, 124547, 124548, 124549, 124550, 124551, 124552, 124553, 124554, 124555,
+    124556, 124557, 124558, 124559, 124560, 124561, 124562, 124563, 124564, 124565, 124566, 124567, 124573, 124572, 124574, 124575, 124571, 124570, 124569, 124568, 124592, 124593,
+    124594, 124595, 124596, 124597, 124598, 124599, 124600, 124601, 124602, 124603, 124604, 124605, 124606, 124607, 105346, 105345, 105344, 105486, 105487, 105485, 105484, 105483,
+    105482, 105481, 105480, 105479, 105478, 105477, 105476, 105473, 105472, 105474, 105475, 102387, 102386, 102385, 102384, 102389, 102399, 102398, 102397, 102396, 102393, 102392,
+    102394, 102395, 102383, 102382, 102381, 102380, 102379, 102375
+};
+#endif // MARK_TRIANGLES
+
 bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save) {
     camera cam = setup_camera(nx, ny);
 
@@ -850,6 +899,20 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save
 
     uint32_t numpaths = context.nx * context.ny * context.ns;
     CUDA(cudaMallocManaged((void**)&context.paths, numpaths * sizeof(saved_path)));
+
+#ifdef MARK_TRIANGLES
+    {
+        std::random_shuffle(std::begin(markedTris), std::end(markedTris));
+        uint8_t* bMarkedTris = new uint8_t[ksc.m->numTris];
+        memset((void*)bMarkedTris, 0, ksc.m->numTris * sizeof(uint8_t));
+        for (size_t i = 0; i < 299; i++) {
+            bMarkedTris[markedTris[i]] = i + 1;
+        }
+        CUDA(cudaMalloc((void**)&context.markIndices, ksc.m->numTris * sizeof(uint8_t)));
+        CUDA(cudaMemcpy(context.markIndices, bMarkedTris, ksc.m->numTris * sizeof(uint8_t), cudaMemcpyHostToDevice));
+        delete[] bMarkedTris;
+    }
+#endif // MARK_TRIANGLES
 
     if (save) {
         // store each color sample separately
