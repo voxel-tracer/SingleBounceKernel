@@ -314,6 +314,9 @@ __device__ float hitBvh(const ray & r, const RenderContext & context, float t_mi
     context.maxStat(METRIC_MAX_NUM_INTERNAL, numInternal);
 
     if (numLeaves > 199) context.incStat(METRIC_NUM_HIGH_LEAVES);
+#ifdef COLOR_NUM_NODES
+    rec.numNodes = /*numInternal +*/ numLeaves;
+#endif // COLOR_NUM_NODES
 #endif // STATS
 
     return closest;
@@ -462,6 +465,9 @@ __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, 
         inters.texCoords[0] = (triHit.u * tri.texCoords[1 * 2 + 0] + triHit.v * tri.texCoords[2 * 2 + 0] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 0]);
         inters.texCoords[1] = (triHit.u * tri.texCoords[1 * 2 + 1] + triHit.v * tri.texCoords[2 * 2 + 1] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 1]);
         inters.bitstack = triHit.bitstack;
+#ifdef COLOR_NUM_NODES
+        inters.numNodes = triHit.numNodes;
+#endif // COLOR_NUM_NODES
     }
     else {
         if (isShadow) return false; // shadow rays only care about the main triangle mesh
@@ -571,6 +577,19 @@ __device__ void colorBounce(const RenderContext& context, path& p) {
                 float t = marker * 2;
                 p.color = (1.0f - t) * vec3(0, 0, 1) + t * vec3(0, 1, 0);
             } else {
+                float t = (marker - 0.5f) * 2;
+                p.color = (1.0f - t) * vec3(0, 1, 0) + t * vec3(1, 0, 0);
+            }
+#elif defined(COLOR_NUM_NODES)
+            float marker = inters.numNodes < 300 ? inters.numNodes / 300.0f : 1.0f;
+            if (marker == 0.0f) {
+                p.color = vec3(0, 0, 0);
+            }
+            else if (marker < 0.5) {
+                float t = marker * 2;
+                p.color = (1.0f - t) * vec3(0, 0, 1) + t * vec3(0, 1, 0);
+            }
+            else {
                 float t = (marker - 0.5f) * 2;
                 p.color = (1.0f - t) * vec3(0, 1, 0) + t * vec3(1, 0, 0);
             }
@@ -1102,9 +1121,9 @@ void fromfile(int bnc, RenderContext &context, int tx, int ty, bool save, bool s
 int main(int argc, char** argv)
 {
     bool perf = false;
-    int nx = perf ? 160 : 640;
-    int ny = perf ? 200 : 800;
-    int ns = perf ? 4 : 64;
+    int nx = perf ? 160 : 1280;
+    int ny = perf ? 200 : 1600;
+    int ns = perf ? 4 : 4;
 #ifdef PRIMARY_PERFECT
     int tx = 32;
     int ty = 2;
