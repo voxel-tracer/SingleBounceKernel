@@ -57,9 +57,10 @@ struct saved_path {
 bool load(const std::string input, saved_path* paths, uint32_t expectedNumPaths) {
     std::fstream in(input, std::ios::in | std::ios::binary);
     const char* HEADER = "SBK_00.03";
-    char* header = new char[sizeof(HEADER)];
-    in.read(header, sizeof(HEADER));
-    if (!strcmp(HEADER, header)) {
+    int headerLen = strlen(HEADER) + 1;
+    char* header = new char[headerLen];
+    in.read(header, headerLen);
+    if (strcmp(HEADER, header) != 0) {
         std::cerr << "invalid header " << header << std::endl;
         return false;
     }
@@ -81,7 +82,7 @@ bool load(const std::string input, saved_path* paths, uint32_t expectedNumPaths)
 void save(const std::string output, const saved_path* paths, uint32_t numpaths) {
     std::fstream out(output, std::ios::out | std::ios::binary);
     const char* HEADER = "SBK_00.03";
-    out.write(HEADER, sizeof(HEADER));
+    out.write(HEADER, strlen(HEADER) + 1);
     out.write((char*)&numpaths, sizeof(uint32_t));
     out.write((char*)paths, sizeof(saved_path) * numpaths);
     out.close();

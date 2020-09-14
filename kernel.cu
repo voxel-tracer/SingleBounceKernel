@@ -7,17 +7,17 @@
 
 //#define MARK_TRIANGLES
 
-#define STATS
+//#define STATS
 //#define RUSSIAN_ROULETTE
 //#define SHADOW
 #define TEXTURES
 
 //#define PRIMARY_PERFECT
-//#define PRIMARY0
-#define PRIMARY1
+#define PRIMARY0
+//#define PRIMARY1
 //#define PRIMARY2
 
-#define SAVE_BITSTACK
+//#define SAVE_BITSTACK
 
 #define DUAL_NODES
 
@@ -464,7 +464,9 @@ __device__ bool hit(const RenderContext& context, const path& p, bool isShadow, 
         inters.normal = unit_vector(cross(tri.v[1] - tri.v[0], tri.v[2] - tri.v[0]));
         inters.texCoords[0] = (triHit.u * tri.texCoords[1 * 2 + 0] + triHit.v * tri.texCoords[2 * 2 + 0] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 0]);
         inters.texCoords[1] = (triHit.u * tri.texCoords[1 * 2 + 1] + triHit.v * tri.texCoords[2 * 2 + 1] + (1 - triHit.u - triHit.v) * tri.texCoords[0 * 2 + 1]);
+#ifdef SAVE_BITSTACK
         inters.bitstack = triHit.bitstack;
+#endif // SAVE_BITSTACK
 #ifdef COLOR_NUM_NODES
         inters.numNodes = triHit.numNodes;
 #endif // COLOR_NUM_NODES
@@ -630,7 +632,9 @@ __device__ void colorBounce(const RenderContext& context, path& p) {
         p.attenuation *= scatter.throughput;
         p.specular = scatter.specular;
         p.inside = scatter.refracted ? !p.inside : p.inside;
+#ifdef SAVE_BITSTACK
         p.bitstack = inters.bitstack;
+#endif // SAVE_BITSTACK
 #ifdef SHADOW
         // trace shadow ray for diffuse rays
         if (!p.specular && generateShadowRay(context, p, inters)) {
@@ -1054,7 +1058,7 @@ void iterate(RenderContext& context, int tx, int ty, bool savePaths) {
         save(filename(0, context.ns, false), context.paths, context.numpaths());
     }
 
-    for (auto i = 1; i < 1; i++) {
+    for (auto i = 1; i < 8; i++) {
         time = clock();
         context.resetStats();
         bounce << <blocks, threads >> > (context, i, savePaths);
@@ -1121,9 +1125,9 @@ void fromfile(int bnc, RenderContext &context, int tx, int ty, bool save, bool s
 int main(int argc, char** argv)
 {
     bool perf = false;
-    int nx = perf ? 160 : 1280;
-    int ny = perf ? 200 : 1600;
-    int ns = perf ? 4 : 4;
+    int nx = perf ? 320 : 320;
+    int ny = perf ? 400 : 400;
+    int ns = perf ? 64 : 64;
 #ifdef PRIMARY_PERFECT
     int tx = 32;
     int ty = 2;
