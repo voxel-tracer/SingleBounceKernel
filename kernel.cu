@@ -13,11 +13,13 @@
 #define TEXTURES
 
 //#define PRIMARY_PERFECT
-#define PRIMARY0
-//#define PRIMARY1
+//#define PRIMARY0
+#define PRIMARY1
 //#define PRIMARY2
 
 //#define SAVE_BITSTACK
+
+#define USE_BVH_TEXTURE
 
 #define DUAL_NODES
 
@@ -109,9 +111,16 @@ struct RenderContext {
 #endif // MARK_TRIANGLES
     material* materials;
     bbox bounds;
-    bvh_node* bvh;
+
     uint32_t firstLeafIdx;
     uint32_t numPrimitivesPerLeaf = 5; //TODO load this from bin file
+
+#ifdef USE_BVH_TEXTURE
+    float* d_bvh;
+    cudaTextureObject_t bvh_tex;
+#else
+    bvh_node* bvh;
+#endif // USE_BVH_TEXTURE
 
 #ifdef TEXTURES
     float** tex_data;
@@ -241,10 +250,22 @@ __device__ float hitBvh(const ray & r, const RenderContext & context, float t_mi
             context.countNode(idx2);
             context.countNode(idx2 + 1);
 #endif // COHERENCE
+
+#ifdef USE_BVH_TEXTURE
+            int float4_idx = idx * 3;
+            float4 bvh_a = tex1Dfetch<float4>(context.bvh_tex, float4_idx);
+            float4 bvh_b = tex1Dfetch<float4>(context.bvh_tex, float4_idx + 1);
+            float4 bvh_c = tex1Dfetch<float4>(context.bvh_tex, float4_idx + 2);
+
+            bvh_node left(bvh_a.x, bvh_a.y, bvh_a.z, bvh_a.w, bvh_b.x, bvh_b.y);
+            bvh_node right(bvh_b.z, bvh_b.w, bvh_c.x, bvh_c.y, bvh_c.z, bvh_c.w);
+#else
             bvh_node left = context.bvh[idx2];
+            bvh_node right = context.bvh[idx2 + 1];
+#endif // USE_BVH_TEXTURE
+
             float leftHit = hit_bbox_dist(left.min(), left.max(), r, closest);
             bool traverseLeft = leftHit < closest;
-            bvh_node right = context.bvh[idx2 + 1];
             float rightHit = hit_bbox_dist(right.min(), right.max(), r, closest);
             bool traverseRight = rightHit < closest;
             bool swap = rightHit < leftHit;
@@ -949,10 +970,35 @@ bool initRenderContext(RenderContext& context, int nx, int ny, int ns, bool save
         memset(context.colors, 0, size);
     }
 
+#ifdef USE_BVH_TEXTURE
+    // copy bvh data to float array
+    CUDA(cudaMalloc((void**)&context.d_bvh, ksc.m->numBvhNodes * sizeof(bvh_node)));
+    CUDA(cudaMemcpy(context.d_bvh, ksc.m->bvh, ksc.m->numBvhNodes * sizeof(bvh_node), cudaMemcpyHostToDevice));
+
+    cudaResourceDesc texRes;
+    memset(&texRes, 0, sizeof(cudaResourceDesc));
+
+    texRes.resType = cudaResourceTypeLinear;
+    texRes.res.linear.devPtr = context.d_bvh;
+    texRes.res.linear.sizeInBytes = sizeof(bvh_node) * ksc.m->numBvhNodes;
+    texRes.res.linear.desc = cudaCreateChannelDesc<float4>();
+
+    cudaTextureDesc texDescr;
+    memset(&texDescr, 0, sizeof(cudaTextureDesc));
+
+    texDescr.normalizedCoords = false; // we access coordinates as is
+    texDescr.filterMode = cudaFilterModePoint; // return closest texel
+    texDescr.readMode = cudaReadModeElementType;
+
+    CUDA(cudaCreateTextureObject(&context.bvh_tex, &texRes, &texDescr, NULL));
+#else
+    CUDA(cudaMalloc((void**)&renderContext.bvh, ksc.m->numBvhNodes * sizeof(bvh_node)));
+    CUDA(cudaMemcpy(renderContext.bvh, ksc.m->bvh, ksc.m->numBvhNodes * sizeof(bvh_node), cudaMemcpyHostToDevice));
+#endif // USE_BVH_TEXTURE
+
     CUDA(cudaMalloc((void**)&context.tris, ksc.m->numTris * sizeof(triangle)));
     CUDA(cudaMemcpy(context.tris, ksc.m->tris, ksc.m->numTris * sizeof(triangle), cudaMemcpyHostToDevice));
-    CUDA(cudaMalloc((void**)&context.bvh, ksc.m->numBvhNodes * sizeof(bvh_node)));
-    CUDA(cudaMemcpy(context.bvh, ksc.m->bvh, ksc.m->numBvhNodes * sizeof(bvh_node), cudaMemcpyHostToDevice));
+
     context.firstLeafIdx = ksc.m->numBvhNodes / 2;
     context.bounds = ksc.m->bounds;
 
@@ -1124,7 +1170,7 @@ void fromfile(int bnc, RenderContext &context, int tx, int ty, bool save, bool s
 
 int main(int argc, char** argv)
 {
-    bool perf = false;
+    bool perf = true;
     int nx = perf ? 320 : 320;
     int ny = perf ? 400 : 400;
     int ns = perf ? 64 : 64;
@@ -1166,6 +1212,12 @@ int main(int argc, char** argv)
     }
 
     CUDA(cudaFree(context.paths));
+#ifdef USE_BVH_TEXTURE
+    CUDA(cudaFree(context.d_bvh));
+    CUDA(cudaDestroyTextureObject(context.bvh_tex));
+#else
+    checkCudaErrors(cudaFree(context.bvh));
+#endif // USE_BVH_TEXTURE
 
     return 0;
 }
